@@ -7,10 +7,43 @@ PAXG 黄金套利监控系统
 import asyncio
 import aiohttp
 import json
+import logging
+import sys
 import time
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+
+
+def setup_logger(name: str = "paxg_monitor", log_file: str = None) -> logging.Logger:
+    """配置日志器"""
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.DEBUG)
+
+    # 日志格式：时间戳 - 级别 - 消息
+    formatter = logging.Formatter(
+        fmt="%(asctime)s.%(msecs)03d | %(levelname)-7s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+
+    # 控制台输出
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+
+    # 文件输出（如果指定）
+    if log_file:
+        file_handler = logging.FileHandler(log_file, encoding="utf-8")
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+
+    return logger
+
+
+# 全局日志器
+logger = setup_logger()
 
 
 class BinanceAPI:
@@ -197,7 +230,7 @@ class PAXGMonitor:
 
         for key, result in zip(tasks.keys(), gathered):
             if isinstance(result, Exception):
-                print(f"  Warning: Error fetching {key}: {result}")
+                logger.warning(f"Error fetching {key}: {result}")
                 results[key] = None
             else:
                 results[key] = result
@@ -349,44 +382,52 @@ class PAXGMonitor:
 
     async def run_forever(self, interval_seconds: int = 60):
         """持续运行，每分钟采集一次"""
-        print(f"Starting PAXG monitor, interval: {interval_seconds}s")
-        print(f"Output directory: {self.output_dir}")
-        print(f"Files: {', '.join(self.files.keys())}")
-        print("-" * 50)
+        logger.info(f"Starting PAXG monitor")
+        logger.info(f"Symbol: {self.symbol} | Interval: {interval_seconds}s | Spread target: {self.target_oz} oz")
+        logger.info(f"Output directory: {self.output_dir}")
+        logger.info(f"Output files: {', '.join(self.files.keys())}")
+        logger.info("-" * 60)
 
         async with aiohttp.ClientSession() as session:
             api = BinanceAPI(session)
+            cycle_count = 0
 
             while True:
                 try:
                     start_time = time.time()
-                    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                    cycle_count += 1
 
+                    logger.debug(f"Cycle #{cycle_count} - Fetching data...")
                     raw_data = await self.fetch_all_data(api)
                     self.process_and_write(raw_data)
 
-                    # 打印摘要
+                    # 日志摘要
                     ticker = raw_data.get("ticker") or {}
                     basis_list = raw_data.get("basis") or [{}]
                     basis = basis_list[0] if basis_list else {}
+                    oi_list = raw_data.get("open_interest_hist") or [{}]
+                    oi = oi_list[0] if oi_list else {}
 
-                    print(f"[{ts}] Data written")
-                    print(f"  Price: ${ticker.get('lastPrice', 'N/A')} | "
-                          f"Basis: {basis.get('basis', 'N/A')} ({basis.get('basisRate', 'N/A')})")
+                    price = ticker.get('lastPrice', 'N/A')
+                    basis_val = basis.get('basis', 'N/A')
+                    basis_rate = basis.get('basisRate', 'N/A')
+                    oi_val = oi.get('sumOpenInterest', 'N/A')
+
+                    logger.info(f"Data saved | Price: ${price} | Basis: {basis_val} ({basis_rate}) | OI: {oi_val}")
 
                     # 等待到下一分钟
                     elapsed = time.time() - start_time
                     sleep_time = max(0, interval_seconds - elapsed)
+                    logger.debug(f"Cycle #{cycle_count} completed in {elapsed:.2f}s, sleeping {sleep_time:.2f}s")
                     await asyncio.sleep(sleep_time)
 
                 except Exception as e:
-                    print(f"Error: {e}")
-                    import traceback
-                    traceback.print_exc()
+                    logger.error(f"Error in cycle #{cycle_count}: {e}", exc_info=True)
                     await asyncio.sleep(5)
 
 
 async def main():
+    global logger
     import argparse
 
     parser = argparse.ArgumentParser(description="PAXG 黄金套利监控系统")
@@ -394,20 +435,31 @@ async def main():
     parser.add_argument("-i", "--interval", type=int, default=60, help="采集间隔（秒）")
     parser.add_argument("--once", action="store_true", help="只运行一次")
     parser.add_argument("--oz", type=float, default=2.0, help="计算 spread 的目标盎司数")
+    parser.add_argument("--log-file", default=None, help="日志文件路径（可选）")
+    parser.add_argument("--debug", action="store_true", help="启用调试日志")
 
     args = parser.parse_args()
+
+    # 重新配置日志器（如果需要写入文件或开启调试）
+    if args.log_file or args.debug:
+        # 清除现有 handlers
+        logger.handlers.clear()
+        logger = setup_logger(log_file=args.log_file)
+        if args.debug:
+            for handler in logger.handlers:
+                handler.setLevel(logging.DEBUG)
 
     monitor = PAXGMonitor(output_dir=args.output, target_oz=args.oz)
 
     if args.once:
+        logger.info("Running single data collection...")
         await monitor.run_once()
-        print(f"\nData written to {args.output}/")
+        logger.info(f"Data written to {args.output}/")
         for name, path in monitor.files.items():
             if path.exists():
                 with open(path) as f:
                     last_line = f.readlines()[-1]
-                print(f"\n{name}.jsonl:")
-                print(f"  {last_line.strip()}")
+                logger.info(f"{name}.jsonl: {last_line.strip()}")
     else:
         await monitor.run_forever(interval_seconds=args.interval)
 

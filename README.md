@@ -31,7 +31,6 @@
          "symbol":"PAXGUSDT",
 	      "sumOpenInterest":"20403.12345678",// 持仓总数量
 	      "sumOpenInterestValue": "176196512.12345678", // 持仓总价值
-          "CMCCirculatingSupply": "165880.538", // CMC提供的流通供应量
 	      "timestamp":1583127900000
     }
 
